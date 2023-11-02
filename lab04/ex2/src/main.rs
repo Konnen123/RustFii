@@ -1,9 +1,12 @@
 use std::{fs, io};
 fn main() {
+    let end_time = Instant::now();
     match ROT13() {
         Ok(cypher) => println!("Your encrypted data is: {}", cypher),
         Err(error) => println!("Error: {}", error),
     }
+    let elapsed_time = end_time - start_time;
+    println!("{}",elapsed_time.as_nanos());    
 }
 
 fn ROT13() -> Result<String, io::Error> {

@@ -8,7 +8,7 @@ enum ROT13_Errors
 }
 fn main() ->Result<(), io::Error>
 {
-    let mut data: String = fs::read_to_string("src/input.txt")?;
+    let mut data: String = fs::read_to_string("input.txt")?;
     match ROT13(&data)
     {
         Ok(()) =>println!(),
@@ -35,7 +35,7 @@ fn ROT13(data :  &str) -> Result<(), ROT13_Errors> {
         }
 
     }
-    match fs::write("src/output.txt", cypher)
+    match fs::write("output.txt", cypher)
     {
         Ok(ok)=>return Ok(()),
         Err(error)=>return Err(ROT13_Errors::CantWriteToFile),
