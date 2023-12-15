@@ -7,5 +7,6 @@ edition = "2021"
 
 [dependencies]
 rand = "0.8.5"
-procfs = "0.15.1"
-
+procfs = "0.16.0"
+egui = "0.24.1"
+eframe = "0.24.1"

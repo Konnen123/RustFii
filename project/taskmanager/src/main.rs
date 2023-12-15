@@ -1,17 +1,140 @@
 use std::fs;
 use std::io;
 
+use eframe::NativeOptions;
+use egui::Color32;
+use egui::FontId;
+use egui::RichText;
+use egui::Ui;
 use std::process::Command;
 use std::str::FromStr;
+#[derive(Default)]
+struct App {
+    prev_total_cpu_time: f32,
+    prev_idle_cpu_time: f32,
+    isFirstTime: bool,
+    processes_data: Vec<ProcInfo>,
+}
 
-struct ProcessInfo {
+impl App {
+    fn new(cc: &eframe::CreationContext<'_>, process_data: Vec<ProcInfo>) -> Self {
+        // Customize egui here with cc.egui_ctx.set_fonts and cc.egui_ctx.set_visuals.
+        // Restore app state using cc.storage (requires the "persistence" feature).
+        // Use the cc.gl (a glow::Context) to create graphics shaders and buffers that you can use
+        // for e.g. egui::PaintCallback.
+        Self {
+            prev_total_cpu_time: 0.,
+            prev_idle_cpu_time: 0.,
+            isFirstTime: true,
+            processes_data: process_data,
+        }
+    }
+}
+
+impl eframe::App for App {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        egui::CentralPanel::default().show(&ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(format!(
+                    "Total cpu usage: {:.2}%",
+                    read_cpu_usage(&mut self.prev_total_cpu_time, &mut self.prev_idle_cpu_time)
+                        .unwrap()
+                ));
+            });
+
+            ui.horizontal(|ui| {
+                ui.columns(7, |columns| {
+                    columns[0].label(
+                        RichText::new("Name")
+                            .font(FontId::new(20., egui::FontFamily::Proportional)),
+                    );
+                    columns[1].label(
+                        RichText::new("User")
+                            .font(FontId::new(20., egui::FontFamily::Proportional)),
+                    );
+                    columns[2].label(
+                        RichText::new("PID").font(FontId::new(20., egui::FontFamily::Proportional)),
+                    );
+                    columns[3].label(
+                        RichText::new("Status")
+                            .font(FontId::new(20., egui::FontFamily::Proportional)),
+                    );
+                    columns[4].label(
+                        RichText::new("CPU%")
+                            .font(FontId::new(20., egui::FontFamily::Proportional)),
+                    );
+                    columns[5].label(
+                        RichText::new("Mem").font(FontId::new(20., egui::FontFamily::Proportional)),
+                    );
+                    columns[6].label(
+                        RichText::new("Path")
+                            .font(FontId::new(20., egui::FontFamily::Proportional)),
+                    );
+                });
+            });
+
+            let text_style = egui::TextStyle::Body;
+            let row_height = ui.text_style_height(&text_style);
+            let total_rows = self.processes_data.len();
+
+            egui::ScrollArea::vertical().auto_shrink(false).show_rows(
+                ui,
+                row_height,
+                total_rows,
+                |ui: &mut Ui, total_rows: std::ops::Range<usize>| {
+                    for i in total_rows {
+
+                        ui.horizontal(|ui| {
+                            ui.columns(7, |columns| {
+                                columns[0].label(
+                                    RichText::new(format!("{}", &self.processes_data[i].name)),
+                                );
+                                columns[1].label(
+                                    RichText::new(format!("{}", &self.processes_data[i].user)),
+                                );
+                                columns[2].label(
+                                    RichText::new(format!("{}", &self.processes_data[i].pid)),
+                                );
+                                columns[3].label(
+                                    RichText::new(format!("{}", &self.processes_data[i].status)),
+                                );
+                                columns[4].label(
+                                    RichText::new(format!("{:.2}%", &self.processes_data[i].cpu)),
+                                );
+                                columns[5].label(
+                                    RichText::new(format!("{} kb", &self.processes_data[i].memory_used)),
+                                );
+                                columns[6].label(
+                                    RichText::new(format!("{}", &self.processes_data[i].path)),
+                                );
+                            });
+                        });
+                    }
+                },
+            );
+        });
+
+        // sleep(Duration::new(5, 0));
+    }
+}
+
+struct Info {
     pid: u32,
     name: String,
     status: String,
     memory_used: u32,
 }
+struct ProcInfo {
+    name: String,
+    user: String,
+    pid: u32,
+    status: String,
+    cpu: f32,
+    memory_used: u32,
+    path: String,
+}
 //################################################################
-fn read_process_info(pid: u32) -> io::Result<ProcessInfo> {
+fn read_process_info(pid: u32) -> io::Result<Info> {
     let status_path = format!("/proc/{}/status", pid);
     let status_content = fs::read_to_string(status_path)?;
 
@@ -32,7 +155,7 @@ fn read_process_info(pid: u32) -> io::Result<ProcessInfo> {
         }
     }
 
-    Ok(ProcessInfo {
+    Ok(Info {
         pid,
         name,
         status,
@@ -55,8 +178,7 @@ fn read_cpu_usage(prev_total_time: &mut f32, prev_idle_time: &mut f32) -> io::Re
         }
         let data_as_number: f32 = FromStr::from_str(data.1).unwrap();
         //idle is found at coloumn 5
-        if data.0 == 4
-        {
+        if data.0 == 4 {
             idle_time = data_as_number;
         }
         // sum all of the times found on that first line to get the total time
@@ -157,40 +279,49 @@ fn get_children_processes(pid: u32) -> io::Result<String> {
 }
 //################################################################
 fn main() {
-    let proc_path = "/proc";
+    let mut processes_data: Vec<ProcInfo> = Vec::new();
 
-    let mut total_memory = 0_u32;
+    let proc_path = "/proc";
 
     if let Ok(entries) = fs::read_dir(proc_path) {
         for entry in entries.filter_map(|e| e.ok()) {
             if let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() {
-                match get_children_processes(pid) {
-                    Ok(tree) => println!("{}", tree),
-                    Err(error) => println!("Error at get_children_process: {}", error),
-                }
-                if let Ok(process_info) = read_process_info(pid) {
-                    print!(
-                        "PID: {} | Name: {} | Status: {} | Memory used: {} kb | ",
-                        process_info.pid,
-                        process_info.name,
-                        process_info.status,
-                        process_info.memory_used
-                    );
-                    total_memory += process_info.memory_used;
-                }
+                let mut proc_info: ProcInfo = ProcInfo {
+                    name: String::from(""),
+                    user: String::from(""),
+                    pid: 0,
+                    status: String::from(""),
+                    cpu: 0.,
+                    memory_used: 0,
+                    path: String::from(""),
+                };
 
+                if let Ok(info) = read_process_info(pid) {
+                    proc_info.status = info.status;
+                    proc_info.pid = info.pid;
+                    proc_info.memory_used = info.memory_used;
+                    proc_info.name = info.name;
+                }
                 if let Ok(process_cpu_usage) = get_process_cpu_usage(pid) {
-                    print!("CPU usage: {:.2}% | ", process_cpu_usage);
+                    proc_info.cpu = process_cpu_usage;
                 }
                 if let Ok(user_name) = get_process_user_name(pid) {
-                    print!("User name: {} | ", user_name);
+                    proc_info.user = user_name;
                 }
                 if let Ok(file_path) = get_process_file_path(pid) {
-                    println!("File path: {}", file_path);
+                    proc_info.path = file_path;
                 }
-                println!("----------------------");
+                processes_data.push(proc_info);
             }
         }
     }
-    println!("Total Memory: {} kb", total_memory);
+    let native_options = NativeOptions::default();
+    match eframe::run_native(
+        "Task Manager",
+        native_options,
+        Box::new(|cc| Box::new(App::new(cc, processes_data))),
+    ) {
+        Ok(()) => println!("Running!"),
+        Err(error) => println!("Error: {}", error),
+    }
 }
