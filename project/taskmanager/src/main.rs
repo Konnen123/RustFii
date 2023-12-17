@@ -1,15 +1,12 @@
 use std::collections::BTreeMap;
-
 use std::fs;
 use std::io;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
-
-
 use eframe::NativeOptions;
-
+use procfs::process;
 use egui::FontId;
 use egui::RichText;
 use egui::Ui;
@@ -17,27 +14,29 @@ use std::process::Command;
 use std::str::FromStr;
 #[derive(Default)]
 struct App {
-    prev_total_cpu_time: f32,
-    prev_idle_cpu_time: f32,
     is_list_mode: bool,
-    processes_data: BTreeMap<u32, ProcInfo>,
+    process_data_mutex: Arc<Mutex<BTreeMap<u32, ProcInfo>>>,
     total_cpu_usage: Arc<Mutex<f32>>,
+    total_memory_usage : Arc<Mutex<f32>>,
 }
 
 impl App {
-    fn new(cc: &eframe::CreationContext<'_>, process_data: BTreeMap<u32, ProcInfo>, mut total_cpu_usage: Arc<Mutex<f32>>) -> Self {
+    fn new(
+        cc: &eframe::CreationContext<'_>,
+        process_data_mutex: Arc<Mutex<BTreeMap<u32, ProcInfo>>>,
+        total_cpu_usage: Arc<Mutex<f32>>,
+        total_memory_usage: Arc<Mutex<f32>>,
+    ) -> Self {
         // Customize egui here with cc.egui_ctx.set_fonts and cc.egui_ctx.set_visuals.
         // Restore app state using cc.storage (requires the "persistence" feature).
         // Use the cc.gl (a glow::Context) to create graphics shaders and buffers that you can use
         // for e.g. egui::PaintCallback.
-         Self {
-            prev_total_cpu_time: 0.,
-            prev_idle_cpu_time: 0.,
+        Self {
             is_list_mode: true,
-            processes_data: process_data,
+            process_data_mutex: process_data_mutex,
             total_cpu_usage: total_cpu_usage,
+            total_memory_usage: total_memory_usage,
         }
-        
     }
 
     fn create_header_row(&self, ui: &mut Ui) {
@@ -70,27 +69,45 @@ impl App {
     fn show_rows_as_list(&self, ui: &mut Ui) {
         let text_style = egui::TextStyle::Body;
         let row_height = ui.text_style_height(&text_style);
-        let total_rows = self.processes_data.len();
+        let total_rows;
+        match self.process_data_mutex.lock() {
+            Ok(process_map) => total_rows = process_map.len(),
+            Err(error) => {
+                println!("Error at getting process_data length: {error}");
+                return;
+            }
+        }
 
         egui::ScrollArea::vertical().auto_shrink(false).show_rows(
             ui,
             row_height,
             total_rows,
             |ui: &mut Ui, total_rows: std::ops::Range<usize>| {
-                let process_vec: Vec<_> = self.processes_data.values().collect();
-                for i in total_rows {
-                    ui.horizontal(|ui| {
-                        ui.columns(7, |columns| {
-                            columns[0].label(RichText::new(format!("{}", process_vec[i].name)));
-                            columns[1].label(RichText::new(format!("{}", process_vec[i].user)));
-                            columns[2].label(RichText::new(format!("{}", process_vec[i].pid)));
-                            columns[3].label(RichText::new(format!("{}", process_vec[i].status)));
-                            columns[4].label(RichText::new(format!("{:.2}%", process_vec[i].cpu)));
-                            columns[5]
-                                .label(RichText::new(format!("{} kb", process_vec[i].memory_used)));
-                            columns[6].label(RichText::new(format!("{}", process_vec[i].path)));
+                if let Ok(process_map) = self.process_data_mutex.lock() {
+                    let process_vec: Vec<&ProcInfo> = process_map.values().collect();
+
+                    for i in total_rows {
+                        ui.horizontal(|ui| {
+                            ui.columns(7, |columns| {
+                                columns[0].label(RichText::new(format!("{}", process_vec[i].name)));
+                                columns[1].label(RichText::new(format!("{}", process_vec[i].user)));
+                                columns[2].label(RichText::new(format!("{}", process_vec[i].pid)));
+                                columns[3]
+                                    .label(RichText::new(format!("{}", process_vec[i].status)));
+                                columns[4]
+                                    .label(RichText::new(format!("{:.2}%", process_vec[i].cpu)));
+                                columns[5].label(RichText::new(format!(
+                                    "{:.2} Mb",
+                                    process_vec[i].memory_used
+                                )));
+                                columns[6].label(RichText::new(format!("{}", process_vec[i].path)));
+                            });
                         });
-                    });
+                    }
+                }
+                else
+                {
+                    println!("Error at locking the mutex in the function show_rows_as_list!");
                 }
             },
         );
@@ -99,34 +116,43 @@ impl App {
         let text_style = egui::TextStyle::Body;
         let row_height = ui.text_style_height(&text_style);
         let total_rows = 0; //self.processes_data.len();
-        
+
         egui::ScrollArea::vertical().auto_shrink(false).show_rows(
             ui,
             row_height,
             total_rows,
             |ui: &mut Ui, total_rows: std::ops::Range<usize>| {
-                for process in self.processes_data.values() {
-                    if process.is_children {
-                        continue;
+                if let Ok(process_map) = self.process_data_mutex.lock() {
+                    for process in process_map.values() {
+                        if process.is_children {
+                            continue;
+                        }
+                        let values: std::collections::btree_map::Values<'_, u32, ProcInfo> = process_map.values();
+                        self.create_collapse_area(ui, process,values)
                     }
-                    self.create_collapse_area(ui, process)
+                }
+                else
+                {
+                    println!("Error at getting process_map from tree view!");
                 }
             },
         );
     }
-    fn create_collapse_area(&self, ui: &mut Ui, process: &ProcInfo) {
+    fn create_collapse_area(&self, ui: &mut Ui, process: &ProcInfo, mut values : std::collections::btree_map::Values<'_, u32, ProcInfo>) {
         if process.children_processes.is_empty() {
-            ui.label(RichText::new(format!{"{} | {} | {} | {} | {:.2}% | {} kb | {}",process.name,process.user,process.pid,process.status,process.cpu,process.memory_used,process.path}));
+            ui.label(RichText::new(format!{"{} | {} | {} | {} | {:.2}% | {:.2} Mb | {}",process.name,process.user,process.pid,process.status,process.cpu,process.memory_used,process.path}));
         } else {
-            ui.collapsing(RichText::new(format!{"{} | {} | {} | {} | {:.2}% | {} kb | {}",process.name,process.user,process.pid,process.status,process.cpu,process.memory_used,process.path}), |ui| {
-                
-                for child in &process.children_processes
-                {
-                    if let Some(child_process) = self.processes_data.get(child)
+            ui.collapsing(RichText::new(format!{"{} | {} | {} | {} | {:.2}% | {:.2} Mb | {}",process.name,process.user,process.pid,process.status,process.cpu,process.memory_used,process.path}), |ui| {
+
+                    for child in &process.children_processes
                     {
-                        self.create_collapse_area(ui, child_process)
+ 
+                        if let Some(child_process) = values.find(|proc_info| {if proc_info.pid == *child {return true;} else {return false;}})
+                        {
+                            self.create_collapse_area(ui, child_process, values.clone());
+                        }
                     }
-                }
+                
             });
         }
     }
@@ -137,11 +163,16 @@ impl eframe::App for App {
         egui::CentralPanel::default().show(&ctx, |ui| {
             ui.horizontal(|ui| {
                 if let Ok(locked_value) = self.total_cpu_usage.lock() {
-                    ui.label(format!("Total cpu usage: {:.2}%",locked_value));
-                }
-                else
-                {
+                    ui.label(format!("Total cpu usage: {:.2}%", locked_value));
+                } else {
                     ui.label(format!("Unable to get cpu usage!"));
+                }
+            });
+            ui.horizontal(|ui| {
+                if let Ok(memory_used) = self.total_memory_usage.lock() {
+                    ui.label(format!("Total memory used {:.2} GB", memory_used));
+                } else {
+                    ui.label(format!("Unable to get memory usage!"));
                 }
             });
             let mut button_message = String::from("List view");
@@ -179,7 +210,7 @@ struct ProcInfo {
     pid: u32,
     status: String,
     cpu: f32,
-    memory_used: u32,
+    memory_used: f32,
     path: String,
     children_processes: Vec<u32>,
     is_children: bool,
@@ -252,6 +283,40 @@ fn read_cpu_usage(prev_total_time: &mut f32, prev_idle_time: &mut f32) -> io::Re
     Ok(cpu_usage_percentage)
 }
 //################################################################
+fn read_memory_usage() -> io::Result<f32> {
+    // read the first line of   /proc/stat
+    let status_content = fs::read_to_string("/proc/meminfo")?;
+    
+    let mut memory_lines = status_content.lines();
+    let mut total_memory_kb: f32 = 0.;
+    let available_memory_kb: f32 = 0.;
+    if let Some(total_memory) = memory_lines.nth(0)
+    {
+        let string_value_option = total_memory.split_whitespace().nth(1);
+        if let Some(string_value) = string_value_option
+        {
+            if let Ok(parsed_memory) = string_value.parse::<f32>()
+            {
+                total_memory_kb = parsed_memory;
+            }
+        }
+    }
+
+    if let Some(available_memory) = memory_lines.nth(1)
+    {
+        let string_value_option = available_memory.split_whitespace().nth(1);
+        if let Some(string_value) = string_value_option
+        {
+            if let Ok(parsed_memory) = string_value.parse::<f32>()
+            {
+                total_memory_kb = parsed_memory;
+            }
+        }
+    }
+
+    Ok(total_memory_kb-available_memory_kb)
+}
+//################################################################
 //https://stackoverflow.com/questions/16726779/how-do-i-get-the-total-cpu-usage-of-an-application-from-proc-pid-stat
 fn get_process_cpu_usage(pid: u32) -> io::Result<f32> {
     let path = format!("/proc/{}/stat", pid);
@@ -261,12 +326,28 @@ fn get_process_cpu_usage(pid: u32) -> io::Result<f32> {
     let fields: Vec<&str> = stat_file.split_whitespace().collect();
     let field_uptime: Vec<&str> = path_uptime.split_whitespace().collect();
 
-    let uptime: f32 = field_uptime[0].parse().unwrap();
-    let utime: u64 = fields[12].parse().unwrap();
-    let stime: u64 = fields[13].parse().unwrap();
+    let mut uptime: f32 = 0.;
+    let mut utime: u32 = 0;
+    let mut stime: u32 = 0;
+    let mut start_time: u32 = 0;
+    if let Ok(value) = field_uptime[0].parse::<f32>()
+    {
+        uptime = value;
+    }
+    if let Ok(value) =  fields[12].parse::<u32>()
+    {
+        utime = value;
+    }
+    if let Ok(value) = fields[13].parse::<u32>()
+    {
+        stime = value;
+    }
+    if let Ok(value) = fields[21].parse::<u32>()
+    {
+        start_time = value;
+    }
     //if we want to include children processes, we need to get fields 14 and 15 too.
 
-    let start_time: u64 = fields[21].parse().unwrap();
     let total_time = utime + stime;
 
     let hertz = procfs::ticks_per_second() as f32;
@@ -339,7 +420,7 @@ fn get_process_data(pid: u32) -> ProcInfo {
         pid: 0,
         status: String::from(""),
         cpu: 0.,
-        memory_used: 0,
+        memory_used: 0.,
         path: String::from(""),
         children_processes: Vec::new(),
         is_children: false,
@@ -348,7 +429,7 @@ fn get_process_data(pid: u32) -> ProcInfo {
     if let Ok(info) = read_process_info(pid) {
         proc_info.status = info.status;
         proc_info.pid = info.pid;
-        proc_info.memory_used = info.memory_used;
+        proc_info.memory_used = info.memory_used as f32 / 1024.0;
         proc_info.name = info.name;
         proc_info.is_children = info.is_children;
     }
@@ -370,35 +451,66 @@ fn get_process_data(pid: u32) -> ProcInfo {
 //################################################################
 
 fn main() {
-    let mut processes_data: BTreeMap<u32, ProcInfo> = BTreeMap::new();
+    let processes_data: BTreeMap<u32, ProcInfo> = BTreeMap::new();
+    let processes_data_mutex = Arc::new(Mutex::new(processes_data));
+    let processes_data_mutex_clone = processes_data_mutex.clone();
 
-    let proc_path = "/proc";
+    thread::spawn(move || {
+        let proc_path = "/proc";
+        
+        loop {
+            let mut next_process_map: BTreeMap<u32, ProcInfo> = BTreeMap::new();
 
-    if let Ok(entries) = fs::read_dir(proc_path) {
-        for entry in entries.filter_map(|e| e.ok()) {
-            if let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() {
-                let proc_info = get_process_data(pid);
-                processes_data.insert(pid, proc_info);
+            if let Ok(entries) = fs::read_dir(proc_path) {
+                for entry in entries.filter_map(|e| e.ok()) {
+                    if let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() {
+                        let proc_info = get_process_data(pid);      
+                        next_process_map.insert(pid, proc_info);
+                        
+                    }
+                }
             }
+            if let Ok(mut current_process_map) = processes_data_mutex.lock()
+            {
+                current_process_map.clear();
+                current_process_map.append(&mut next_process_map); 
+            }
+            else
+            {
+                println!("Error at updating process_map!");
+            }
+            thread::sleep(Duration::new(10, 0));
         }
-    }
+    });
     let total_cpu_usage_mutex = Arc::new(Mutex::new(0.));
     let total_cpu_usage_mutex_clone = total_cpu_usage_mutex.clone();
 
-  
     thread::spawn(move || {
         let mut previous_cpu_usage = 0_f32;
         let mut previous_idle_time = 0_f32;
-        let thread_total_cpu_usage = Arc::clone(&total_cpu_usage_mutex);
-        loop
-        {
+        loop {
             if let Ok(total_cpu) = read_cpu_usage(&mut previous_cpu_usage, &mut previous_idle_time)
             {
-                if let Ok(mut total_cpu_usage) = thread_total_cpu_usage.lock()
-                {
+                if let Ok(mut total_cpu_usage) = total_cpu_usage_mutex.lock() {
                     *total_cpu_usage = total_cpu;
                 }
             }
+            thread::sleep(Duration::new(2, 0));
+        }
+    });
+
+    let total_memory_used_mutex = Arc::new(Mutex::new(0.));
+    let total_memory_used_mutex_clone = total_memory_used_mutex.clone();
+
+    thread::spawn(move || {
+        loop{
+            if let Ok(total_memory) = read_memory_usage()
+            {
+                if let Ok(mut total_memory_used) = total_memory_used_mutex.lock() {
+                    *total_memory_used = total_memory / 1_048_576.0;
+                }
+            }
+
             thread::sleep(Duration::new(2, 0));
         }
     });
@@ -407,7 +519,14 @@ fn main() {
     match eframe::run_native(
         "Task Manager",
         native_options,
-        Box::new(move |cc| Box::new(App::new(cc, processes_data, Arc::clone(&total_cpu_usage_mutex_clone)))),
+        Box::new(move |cc| {
+            Box::new(App::new(
+                cc,
+                processes_data_mutex_clone,
+                total_cpu_usage_mutex_clone,
+                total_memory_used_mutex_clone,
+            ))
+        }),
     ) {
         Ok(()) => println!("Running!"),
         Err(error) => println!("Error: {}", error),
