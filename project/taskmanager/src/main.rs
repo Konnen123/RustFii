@@ -16,6 +16,7 @@ use std::time::Duration;
 struct App {
     is_list_mode: bool,
     is_process_mode: bool,
+    show_all_procesess: bool,
     process_data_mutex: Arc<Mutex<BTreeMap<u32, ProcInfo>>>,
     total_cpu_usage: Arc<Mutex<f32>>,
     memory_info: Arc<Mutex<(f32, f32)>>,
@@ -32,13 +33,13 @@ impl App {
         // Restore app state using cc.storage (requires the "persistence" feature).
         // Use the cc.gl (a glow::Context) to create graphics shaders and buffers that you can use
         // for e.g. egui::PaintCallback.
-        if let Some(cpu_usage) = cc.integration_info.cpu_usage
-        {
-            println!("Cpu usage: {}",cpu_usage);
+        if let Some(cpu_usage) = cc.integration_info.cpu_usage {
+            println!("Cpu usage: {}", cpu_usage);
         }
         Self {
             is_list_mode: true,
             is_process_mode: true,
+            show_all_procesess: false,
             process_data_mutex,
             total_cpu_usage,
             memory_info,
@@ -77,7 +78,16 @@ impl App {
         let row_height = ui.text_style_height(&text_style);
         let mut total_rows: usize = 0;
         match self.process_data_mutex.lock() {
-            Ok(process_map) => total_rows = process_map.len(),
+            Ok(process_map) => {
+                if !self.show_all_procesess
+                {
+                    let x: Vec<_>= process_map.values().filter(|process| process.user != "root").collect();
+                    total_rows = x.len();
+                }
+                else {
+                    total_rows = process_map.len();
+                }
+            }
             Err(error) => {
                 println!("Error at getting process_data length: {error}. The total_rows will be {total_rows}, so we exit function!");
                 return;
@@ -90,23 +100,33 @@ impl App {
             total_rows,
             |ui: &mut Ui, total_rows: std::ops::Range<usize>| {
                 if let Ok(process_map) = self.process_data_mutex.lock() {
-                    let process_vec: Vec<&ProcInfo> = process_map.values().collect();
 
+                let process_vec: Vec<_> = if !self.show_all_procesess
+                {
+                    process_map.values().filter(|process| process.user != "root").collect()
+
+                }
+                else {
+                     process_map.values().collect()
+                };
                     for i in total_rows {
                         ui.horizontal(|ui| {
                             ui.columns(7, |columns| {
-                                columns[0].label(RichText::new(process_vec[i].name.to_string()));
-                                columns[1].label(RichText::new(process_vec[i].user.to_string()));
-                                columns[2].label(RichText::new(format!("{}", process_vec[i].pid)));
-                                columns[3]
-                                    .label(RichText::new(process_vec[i].status.to_string()));
-                                columns[4]
-                                    .label(RichText::new(format!("{:.2}%", process_vec[i].cpu)));
+                                if let Some(process) = process_vec.get(i)
+                                {
+
+                                    columns[0].label(RichText::new(process.name.to_string()));
+                                    columns[1].label(RichText::new(process.user.to_string()));
+                                    columns[2].label(RichText::new(format!("{}",process.pid)));
+                                    columns[3].label(RichText::new(process.status.to_string()));
+                                    columns[4]
+                                    .label(RichText::new(format!("{:.2}%", process.cpu)));
                                 columns[5].label(RichText::new(format!(
                                     "{:.2} Mb",
-                                    process_vec[i].memory_used
+                                    process.memory_used
                                 )));
-                                columns[6].label(RichText::new(process_vec[i].path.to_string()));
+                                columns[6].label(RichText::new(process.path.to_string()));
+                            }
                             });
                         });
                     }
@@ -116,10 +136,10 @@ impl App {
             },
         );
     }
-    fn show_rows_as_tree(&self, ui: &mut Ui) {
+    fn show_rows_as_tree(&mut self, ui: &mut Ui) {
         let text_style = egui::TextStyle::Body;
         let row_height = ui.text_style_height(&text_style);
-        let total_rows = 0; 
+        let total_rows = 0;
 
         egui::ScrollArea::vertical().auto_shrink(false).show_rows(
             ui,
@@ -128,13 +148,23 @@ impl App {
             |ui: &mut Ui, total_rows: std::ops::Range<usize>| {
                 total_rows.is_empty();
                 if let Ok(process_map) = self.process_data_mutex.lock() {
-                    for process in process_map.values() {
-                        if process.is_children {
+                    
+                    let process_vec: Vec<_> = if !self.show_all_procesess
+                    {
+                        process_map.values().filter(|process| process.user != "root").collect()
+                    }
+                    else {
+                        process_map.values().collect()
+                    };
+
+                    for process in &process_vec {
+                        if process_vec.clone().into_iter().any(|proc| process.parent_pid == proc.pid)
+                        {
                             continue;
                         }
                         let values: std::collections::btree_map::Values<'_, u32, ProcInfo> =
-                            process_map.values();
-                        self.create_collapse_area(ui, process, values)
+                        process_map.values();
+                        self.create_collapse_area(ui, process, values);
                     }
                 } else {
                     println!("Error at getting process_map from tree view!");
@@ -147,11 +177,12 @@ impl App {
         ui: &mut Ui,
         process: &ProcInfo,
         mut values: std::collections::btree_map::Values<'_, u32, ProcInfo>,
+
     ) {
         if process.children_processes.is_empty() {
-
             ui.label(RichText::new(format!{"{} | {} | {} | {} | {:.2}% | {:.2} Mb | {}",process.name,process.user,process.pid,process.status,process.cpu,process.memory_used,process.path}));
         } else {
+
             ui.collapsing(RichText::new(format!{"{} | {} | {} | {} | {:.2}% | {:.2} Mb | {}",process.name,process.user,process.pid,process.status,process.cpu,process.memory_used,process.path}), |ui| {
                     for child in &process.children_processes
                     { 
@@ -194,9 +225,12 @@ impl App {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.y = 16.0;
         });
-        if ui.button(button_message).clicked() {
-            self.is_list_mode = !self.is_list_mode;
-        }
+        ui.horizontal(|ui| {
+            if ui.button(button_message).clicked() {
+                self.is_list_mode = !self.is_list_mode;
+            }
+            ui.checkbox(&mut self.show_all_procesess, "Show all processes");
+        });
 
         self.create_header_row(ui);
         if self.is_list_mode {
@@ -235,7 +269,7 @@ struct Info {
     name: String,
     status: String,
     memory_used: u32,
-    is_children: bool,
+    parent_pid: u32,
 }
 #[derive(Clone)]
 struct ProcInfo {
@@ -247,7 +281,7 @@ struct ProcInfo {
     memory_used: f32,
     path: String,
     children_processes: Vec<u32>,
-    is_children: bool,
+    parent_pid: u32,
 }
 //################################################################
 fn read_process_info(pid: u32) -> io::Result<Info> {
@@ -257,7 +291,7 @@ fn read_process_info(pid: u32) -> io::Result<Info> {
     let mut name = String::new();
     let mut status = String::new();
     let mut memory_used: u32 = 0;
-    let mut is_children: bool = false;
+    let mut parent_pid: u32 = 0;
 
     for line in status_content.lines() {
         let parts: Vec<&str> = line.split_whitespace().collect();
@@ -266,10 +300,14 @@ fn read_process_info(pid: u32) -> io::Result<Info> {
             match parts[0] {
                 "Name:" => name = parts[1].to_string(),
                 "State:" => status = parts[1].to_string(),
-                "VmRSS:" => memory_used = parts[1].parse().unwrap(),
+                "VmRSS:" => {
+                    if let Ok(value) = parts[1].parse::<u32>() {
+                        memory_used = value;
+                    }
+                }
                 "PPid:" => {
-                    if parts[1].parse::<u32>().unwrap() != 0 {
-                        is_children = true;
+                    if let Ok(value) = parts[1].parse::<u32>() {
+                        parent_pid = value;
                     }
                 }
                 _ => (),
@@ -282,14 +320,20 @@ fn read_process_info(pid: u32) -> io::Result<Info> {
         name,
         status,
         memory_used,
-        is_children,
+        parent_pid,
     })
 }
 //################################################################
 fn read_cpu_usage(prev_total_time: &mut f32, prev_idle_time: &mut f32) -> io::Result<f32> {
     // read the first line of   /proc/stat
     let status_content = fs::read_to_string("/proc/stat")?;
-    let cpu_line_info = status_content.lines().next().unwrap();
+    let cpu_line_info;
+    if let Some(info) = status_content.lines().next() {
+        cpu_line_info = info;
+    } else {
+        println!("Error at getting cpu_line_info!");
+        return Ok(0.);
+    }
 
     let mut idle_time: f32 = 0_f32;
     let mut total_time: f32 = 0_f32;
@@ -299,7 +343,10 @@ fn read_cpu_usage(prev_total_time: &mut f32, prev_idle_time: &mut f32) -> io::Re
         if data.0 == 0 {
             continue;
         }
-        let data_as_number: f32 = FromStr::from_str(data.1).unwrap();
+        let mut data_as_number: f32 =0.;
+        if let Ok(value) = FromStr::from_str(data.1) {
+            data_as_number = value;
+        }
         //idle is found at coloumn 5
         if data.0 == 4 {
             idle_time = data_as_number;
@@ -404,16 +451,20 @@ fn get_process_user_name(pid: u32) -> io::Result<String> {
 
     if output.status.success() {
         let all_data = String::from_utf8_lossy(&output.stdout).to_string();
-        let result = String::from(
-            all_data
-                .lines()
-                .last()
-                .unwrap()
-                .split_whitespace()
-                .nth(2)
-                .unwrap(),
-        );
-        Ok(result)
+        if let Some(last_line) = all_data.lines().last() {
+            if let Some(user_name) = last_line.split_whitespace().nth(2) {
+                let result = String::from(user_name);
+                Ok(result)
+            }
+            else
+            {
+                Ok(String::from("N/A"))
+            }
+        }
+        else
+        {
+            Ok(String::from("N/A"))
+        }
     } else {
         Ok(String::from("root"))
     }
@@ -447,7 +498,7 @@ fn get_process_data(pid: u32) -> ProcInfo {
         memory_used: 0.,
         path: String::from(""),
         children_processes: Vec::new(),
-        is_children: false,
+        parent_pid: 0,
     };
 
     if let Ok(info) = read_process_info(pid) {
@@ -455,7 +506,7 @@ fn get_process_data(pid: u32) -> ProcInfo {
         proc_info.pid = info.pid;
         proc_info.memory_used = info.memory_used as f32 / 1024.0;
         proc_info.name = info.name;
-        proc_info.is_children = info.is_children;
+        proc_info.parent_pid = info.parent_pid;
     }
     if let Ok(process_cpu_usage) = get_process_cpu_usage(pid) {
         proc_info.cpu = process_cpu_usage;
